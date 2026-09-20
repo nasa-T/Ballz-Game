@@ -24,27 +24,35 @@ class Vector:
         return Vector(self.x-other.x, self.y-other.y)
 
     def __mul__(self, other): # same as self.dot()
-        return self.x*other.x + self.y*other.y
+        if isinstance(other, Vector):
+            return self.x*other.x + self.y*other.y
+        elif isinstance(other, (int,float)):
+            return Vector(self.x*other, self.y*other)
+
+    def __truediv__(self, k):
+        return Vector(self.x/k, self.y/k)
 
 class Game: # holds everything
     def __init__(self, width, height, nblocks):
         # a dictionary mapping block index position to the block
         ## index position starts at (x,y) ~ (0,0)
         self.blocks = {} 
-        self.dt = 0.02
+        self.dt = 0.016
 
         # Going to assume game origin is at bottom left
         self.width = width
         self.height = height
         self.nblocks = 7 # number of block spaces per row
         self.bwidth = width/nblocks
+        self.limit = 8
 
         # Number of rows made so far (determines health of block/tot score)
         self.index = 0 
         self.block_chance = 0.6
         self.double_chance = 0.1
         self.block_space = self.bwidth/20 # space between blocks
-        self.balls = [Ball(width/2, self.bwidth/10, 0, 0, self.bwidth/10, self.dt, self)]
+        self.ball_rad = self.bwidth/9
+        self.balls = [Ball(width/2, self.ball_rad, 0, 0, self.ball_rad, self.dt, self)]
         self.launcher = Launcher(self.balls, self.width/2)
 
         self.num_new = 0
@@ -91,13 +99,15 @@ class Game: # holds everything
             self.blocks[(i,j)].shift_down()
             # add a reference to the shifted block in the new location idx
             temp_blocks[(i,j+1)] = self.blocks[(i,j)]
+            if j+1 == self.limit:
+                self.game_over()
         self.blocks = temp_blocks
 
     def destroy_block(self, block):
         self.blocks.pop(self.pos_to_idx((block.x,block.y)),0)
 
     def add_ball(self):
-        self.balls.append(Ball(self.launcher.x, self.bwidth/10, 0, 0, self.bwidth/10, self.dt, self))
+        self.balls.append(Ball(self.launcher.x, self.ball_rad, 0, 0, self.ball_rad, self.dt, self))
         self.launcher.return_ball(self.balls[-1])
 
     def set_launcher(self, pos):
@@ -119,6 +129,9 @@ class Game: # holds everything
 
     def g2scr_pos(self, pos):
         return (pos[0], self.height - pos[1])
+
+    def game_over(self):
+        pygame.event.post(pygame.event.Event(pygame.QUIT))
 
     def run(self):
         # pygame setup
@@ -150,7 +163,12 @@ class Game: # holds everything
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_SPACE:
-                        self.add_row()
+                        for ball in self.balls:
+                            curr_vel = Vector(ball.vx, ball.vy)
+                            if curr_vel.get_magnitude():
+                                curr_vel.set_magnitude(4*curr_vel.get_magnitude())
+                                ball.vx = curr_vel.x
+                                ball.vy = curr_vel.y
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mouse_pos = self.g2scr_pos(event.pos)
                     #block = self.blocks.get(self.pos_to_idx(mouse_pos), Block(self,0,0,0,0,0,0))
@@ -171,9 +189,13 @@ class Game: # holds everything
                 self.launcher.launch(angle)
                 frame_time = 0
 
+            font_obj = pygame.font.SysFont("Arial", 64, bold=True)
+            text_surface_obj = font_obj.render(str(self.index), True, (255,255,255), (0,0,0))
+            screen.blit(text_surface_obj, (self.width/2, self.bwidth/4))
+
             for ball in self.balls:
                 ball.update()
-                pygame.draw.circle(screen, (255,255,255), self.g2scr_pos((ball.x,ball.y)), self.bwidth/10)
+                pygame.draw.circle(screen, (255,255,255), self.g2scr_pos((ball.x,ball.y)), self.ball_rad)
 
             # render the game
             for b_loc in self.blocks:
@@ -190,9 +212,15 @@ class Game: # holds everything
             # flip() the display to put your work on screen
             pygame.display.flip()
 
-            clock.tick(120)  # limits FPS to 60
+            clock.tick(1/self.dt)  # limits FPS to 60
 
         pygame.quit()
+
+        print("\033[31m###################################")
+        print("             GAME OVER")
+        print("           Final Score:", self.index)
+        print("###################################\033[0m")
+
 
 
 class Launcher: #launches balls
@@ -296,10 +324,7 @@ class Ball:
         idx = self.game.pos_to_idx((self.x, self.y))
         curr_loc = self.game.blocks.get(idx)
         
-        # find the closest locations adjacent to current one based on current quadrant
-        #i_inc = np.sign(self.x % self.game.bwidth - self.game.bwidth/2)
-        #j_inc = -np.sign(self.y % self.game.bwidth - self.game.bwidth/2)
-
+        # find the closest locations adjacent to current one based on velocity
         i_inc = np.sign(self.vx)
         j_inc = -np.sign(self.vy)
         adjacent_locs = [(idx[0],idx[1]), (idx[0]+i_inc,idx[1]), (idx[0],idx[1]+j_inc), (idx[0]+i_inc,idx[1]+j_inc)]
@@ -310,31 +335,46 @@ class Ball:
                 p_bl_ba = Vector(self.x-adj_block.x, self.y-adj_block.y) # position vector block to ball
                 dist = p_bl_ba.get_magnitude()
                 angle_from_vert = np.asin((self.x-adj_block.x)/dist)
+                angle_from_horz = np.asin((self.y-adj_block.y)/dist)
+
                 if np.abs(angle_from_vert) <= np.pi/4: # top or bottom quadrant
-                    dist_to_box_edge = np.abs(adj_block.h/2/np.cos(angle_from_vert))
-                else: # left or right quadrant
-                    dist_to_box_edge = np.abs(adj_block.w/2/np.sin(angle_from_vert))
-                
-                if adj_block.token:
-                    overlap = (dist-self.radius) - adj_block.w/2
-                else:
-                    overlap = (dist-self.radius) - dist_to_box_edge # dist from block edge to ball edge
-                if overlap < 0: # if ball's edge overlaps box's edge
+                    above_below = np.sign(self.y - adj_block.y)
+                    if self.x > adj_block.x+adj_block.w/2: # if outside of corner
+                        intersection = Vector(adj_block.x+adj_block.w/2, adj_block.y+above_below*adj_block.h/2)
+                    elif self.x < adj_block.x - adj_block.w/2:
+                        intersection = Vector(adj_block.x-adj_block.w/2, adj_block.y+above_below*adj_block.h/2)
+                    else:
+                        intersection = Vector(self.x, adj_block.y+above_below*adj_block.h/2)
+
+                else: # side quadrants
+                    left_right = np.sign(self.x - adj_block.x)
+                    if self.y > adj_block.y+adj_block.w/2: # if outside of corner
+                        intersection = Vector(adj_block.x+left_right*adj_block.w/2, adj_block.y+adj_block.h/2)
+                    elif self.y < adj_block.y - adj_block.w/2:
+                        intersection = Vector(adj_block.x+left_right*adj_block.w/2, adj_block.y-adj_block.h/2)
+                    else:
+                        intersection = Vector(adj_block.x+left_right*adj_block.w/2, self.y)
+
+                v_int_ball = Vector(self.x, self.y) - intersection
+                overlap = v_int_ball.get_magnitude() - self.radius
+                if overlap <= 0: # if ball's edge overlaps box's edge
                     if adj_block.token:
                         self.game.num_new += 1
-                        #self.game.add_ball()
                     else:
-                        # reset ball position out of block 
-                        new_dist = dist-overlap
-                        p_bl_ba.set_magnitude(new_dist)
-                        ball_p_vec = Vector(adj_block.x, adj_block.y) + p_bl_ba
+                        new_dist = v_int_ball.get_magnitude() - overlap
+                        v_int_ball.set_magnitude(new_dist)
+                        ball_p_vec = intersection + v_int_ball
                         self.x = ball_p_vec.x
                         self.y = ball_p_vec.y
-                        if np.abs(angle_from_vert) < np.pi/4:
-                            self.vy *= -1
-                        else:
-                            self.vx *= -1
-                    adj_block.hit()
+
+                        norm = Vector(self.x, self.y) - intersection
+                        vel = Vector(self.vx, self.vy)
+                        proj_vel_norm = norm*((vel*norm)/norm.get_magnitude()**2) 
+                        reflection = vel - proj_vel_norm*2
+                        self.vx = reflection.x
+                        self.vy = reflection.y
+
+                    adj_block.hit() 
 
     def project_to_next_idx(self):
         new_x = self.x + self.vx*self.dt
