@@ -6,13 +6,13 @@ class Vector:
         self.x = x
         self.y = y
 
-    def getMagnitude(self):
+    def get_magnitude(self):
         return np.sqrt(self.x**2 + self.y**2)
 
-    def setMagnitude(self, new_mag):
+    def set_magnitude(self, new_mag):
         # Changes magnitude to new_mag keeping the same direction
-        self.x = self.x/self.getMagnitude()*new_mag
-        self.y = self.y/self.getMagnitude()*new_mag
+        self.x = self.x/self.get_magnitude()*new_mag
+        self.y = self.y/self.get_magnitude()*new_mag
 
     def dot(self, other):
         return self.x*other.x + self.y*other.y
@@ -31,7 +31,7 @@ class Game: # holds everything
         # a dictionary mapping block index position to the block
         ## index position starts at (x,y) ~ (0,0)
         self.blocks = {} 
-        self.dt = 0.016
+        self.dt = 0.02
 
         # Going to assume game origin is at bottom left
         self.width = width
@@ -41,11 +41,13 @@ class Game: # holds everything
 
         # Number of rows made so far (determines health of block/tot score)
         self.index = 0 
-        self.block_chance = 0.7
+        self.block_chance = 0.6
         self.double_chance = 0.1
         self.block_space = self.bwidth/20 # space between blocks
         self.balls = [Ball(width/2, self.bwidth/10, 0, 0, self.bwidth/10, self.dt, self)]
         self.launcher = Launcher(self.balls, self.width/2)
+
+        self.num_new = 0
 
     def add_row(self):
         self.shift_down() # shift all other rows down
@@ -57,8 +59,8 @@ class Game: # holds everything
             # token is represented as 1; a token doesn't need to do anything on its own. 
             ## The ball will say if it hit a token
             self.blocks[(token_loc,1)] = Block(self, 1, token_loc*self.bwidth + self.bwidth/2,
-                                               self.height-self.bwidth*3/2, self.bwidth-self.block_space,
-                                               self.bwidth-self.block_space, self.bwidth, token=True)
+                                               self.height-self.bwidth*3/2, self.bwidth/3,
+                                               self.bwidth/3, self.bwidth, token=True)
 
         for i in range(self.nblocks):
             # if 1 is chosen, we are putting a block here; and the slot doesn't have a token 
@@ -95,8 +97,8 @@ class Game: # holds everything
         self.blocks.pop(self.pos_to_idx((block.x,block.y)),0)
 
     def add_ball(self):
-        self.balls.append(Ball(self.width/2, self.bwidth/10, 0, 0, self.bwidth/10, self.dt, self))
-        self.launcher.balls = self.balls
+        self.balls.append(Ball(self.launcher.x, self.bwidth/10, 0, 0, self.bwidth/10, self.dt, self))
+        self.launcher.return_ball(self.balls[-1])
 
     def set_launcher(self, pos):
         self.launcher.x = pos
@@ -127,9 +129,21 @@ class Game: # holds everything
         surface = pygame.Surface((self.width, self.height))
         self.add_row()
 
+        angle = 0
+        min_tot = 1
+        frame_time = 0 # time between frames
         while running:
+            frame_time += clock.get_time()
             # poll for events
             # pygame.QUIT event means the user clicked X to close your window
+
+            if len(self.launcher.queued) == self.launcher.tot_balls:
+                for _ in range(self.num_new):
+                    self.add_ball()
+                    self.num_new = 0
+
+                self.add_row()
+                self.launcher.unlock()
             
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -139,13 +153,27 @@ class Game: # holds everything
                         self.add_row()
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mouse_pos = self.g2scr_pos(event.pos)
-                    block = self.blocks.get(self.pos_to_idx(mouse_pos), Block(self,0,0,0,0,0,0))
-                    block.hit()
-                    angle = np.atan((mouse_pos[0] - self.launcher.x)/(mouse_pos[1]))
-                    self.launcher.launch(angle)
+                    #block = self.blocks.get(self.pos_to_idx(mouse_pos), Block(self,0,0,0,0,0,0))
+                    #block.hit()
+                    if len(self.launcher.balls) >= self.launcher.tot_balls:
+                        self.launcher.unlock()
+                        angle = np.atan((mouse_pos[0] - self.launcher.x)/(mouse_pos[1]))
+                        self.launcher.launch(angle)
+                        frame_time = 0
 
             # fill the screen with a color to wipe away anything from last frame
             screen.fill("black")
+
+            if not self.launcher.balls:
+                self.launcher.lock()
+            #print(frame_time, clock.get_time())
+            if frame_time >= 100 and len(self.launcher.balls) < self.launcher.tot_balls:
+                self.launcher.launch(angle)
+                frame_time = 0
+
+            for ball in self.balls:
+                ball.update()
+                pygame.draw.circle(screen, (255,255,255), self.g2scr_pos((ball.x,ball.y)), self.bwidth/10)
 
             # render the game
             for b_loc in self.blocks:
@@ -159,33 +187,52 @@ class Game: # holds everything
                 elif block.token:
                     pygame.draw.circle(screen, (255,255,0), self.g2scr_pos(self.idx_to_pos(b_loc)), self.bwidth/4)
 
-            for ball in self.balls:
-                ball.update()
-                pygame.draw.circle(screen, (255,255,255), self.g2scr_pos((ball.x,ball.y)), self.bwidth/10)
-
             # flip() the display to put your work on screen
             pygame.display.flip()
 
-            clock.tick(60)  # limits FPS to 60
+            clock.tick(120)  # limits FPS to 60
 
         pygame.quit()
 
 
 class Launcher: #launches balls
     def __init__(self, balls, x):
-        self.balls = balls
+        # launcher starts off locked with all balls in queue
+        self.balls = [] 
         self.x = x
+        self.locked = True
+        self.queued = balls
+        self.tot_balls = len(self.balls)
 
     # angle in radians from vertical; positive = clockwise
     ## launch the first ball in the list
     def launch(self, angle):
         v = 1000
-        for ball in self.balls:
-            if not ball.launched:
-                ball.vx = v*np.sin(angle)
-                ball.vy = v*np.cos(angle)
-                ball.launched = True
-                ball.update()
+        if self.balls and not self.locked:
+            self.balls[0].vx = v*np.sin(angle)
+            self.balls[0].vy = v*np.cos(angle)
+            self.balls[0].update()
+            self.balls = self.balls[1:]
+
+    def return_ball(self, ball):
+        if not self.queued:
+            self.x = ball.x
+        else:
+            ball.x = self.x
+        self.queued.append(ball)
+
+    def unlock(self):
+        if self.locked and len(self.queued) >= self.tot_balls:
+            self.x = self.queued[0].x
+            self.balls = self.queued
+            self.queued = []
+            self.locked = False
+            for ball in self.balls:
+                ball.x = self.x
+            self.tot_balls = len(self.balls)
+
+    def lock(self):
+        self.locked = True
 
 class Block:
     def __init__(self, game, tot_health, x, y, width, height, space_height, token=False):
@@ -219,22 +266,17 @@ class Ball:
         # if it's in the launcher, this is False until it's launched
         self.launched = False 
 
-    def update(self, end_x=None):
-        if self.launched:
-            if self.y < self.radius: # if ball hits the bottom
-                self.launched = False
-                self.y = self.radius # set position to bottom
-                self.game.set_launcher(self.x)
-                # if another ball has hit the bottom first, consolidate to that position
-                if end_x != None: 
-                    self.x = end_x
-                self.vx = 0
-                self.vy = 0
+    def update(self):
+        if self.y < self.radius: # if ball hits the bottom
+            self.y = self.radius # set position to bottom
+            self.vx = 0
+            self.vy = 0
+            self.game.launcher.return_ball(self)
 
-            else: # position change by current velocity
-                self.detect_collisions()
-                self.x = self.x + self.vx * self.dt 
-                self.y = self.y + self.vy * self.dt 
+        else: # position change by current velocity
+            self.detect_collisions()
+            self.x = self.x + self.vx * self.dt 
+            self.y = self.y + self.vy * self.dt 
 
     def detect_collisions(self):
         # bounce off left wall
@@ -254,40 +296,46 @@ class Ball:
         idx = self.game.pos_to_idx((self.x, self.y))
         curr_loc = self.game.blocks.get(idx)
         
-        #if self.vy > 0: # ball moving up; would hit a bottom edge
-        #    vert_block = self.game.blocks.get((idx[0],idx[1]-1))
-        #elif self.vy < 0: # ball moving down; would hit a top edge
-        #    vert_block = self.game.blocks.get((idx[0],idx[1]+1))
-        # above block is reduced into the below
+        # find the closest locations adjacent to current one based on current quadrant
+        #i_inc = np.sign(self.x % self.game.bwidth - self.game.bwidth/2)
+        #j_inc = -np.sign(self.y % self.game.bwidth - self.game.bwidth/2)
 
-        if -1 < idx[0] + np.sign(self.vx) < self.game.nblocks:
-            horz_block = self.game.blocks.get((idx[0]+np.sign(self.vx),idx[1]), None)
-            if horz_block != None:
-                if np.sign(self.vx)*(self.x+np.sign(self.vx)*self.radius) > np.sign(self.vx)*(horz_block.x - np.sign(self.vx)*horz_block.w/2):
-                    if not horz_block.token:
-                        self.x = horz_block.x - np.sign(self.vx)*(horz_block.w/2+self.radius)
-                        self.vx*= -1
+        i_inc = np.sign(self.vx)
+        j_inc = -np.sign(self.vy)
+        adjacent_locs = [(idx[0],idx[1]), (idx[0]+i_inc,idx[1]), (idx[0],idx[1]+j_inc), (idx[0]+i_inc,idx[1]+j_inc)]
+
+        for loc in adjacent_locs:
+            adj_block = self.game.blocks.get(loc, None)
+            if adj_block:
+                p_bl_ba = Vector(self.x-adj_block.x, self.y-adj_block.y) # position vector block to ball
+                dist = p_bl_ba.get_magnitude()
+                angle_from_vert = np.asin((self.x-adj_block.x)/dist)
+                if np.abs(angle_from_vert) <= np.pi/4: # top or bottom quadrant
+                    dist_to_box_edge = np.abs(adj_block.h/2/np.cos(angle_from_vert))
+                else: # left or right quadrant
+                    dist_to_box_edge = np.abs(adj_block.w/2/np.sin(angle_from_vert))
+                
+                if adj_block.token:
+                    overlap = (dist-self.radius) - adj_block.w/2
+                else:
+                    overlap = (dist-self.radius) - dist_to_box_edge # dist from block edge to ball edge
+                if overlap < 0: # if ball's edge overlaps box's edge
+                    if adj_block.token:
+                        self.game.num_new += 1
+                        #self.game.add_ball()
                     else:
-                        self.game.add_ball()
-                    horz_block.hit()
+                        # reset ball position out of block 
+                        new_dist = dist-overlap
+                        p_bl_ba.set_magnitude(new_dist)
+                        ball_p_vec = Vector(adj_block.x, adj_block.y) + p_bl_ba
+                        self.x = ball_p_vec.x
+                        self.y = ball_p_vec.y
+                        if np.abs(angle_from_vert) < np.pi/4:
+                            self.vy *= -1
+                        else:
+                            self.vx *= -1
+                    adj_block.hit()
 
-        if idx[1] - np.sign(self.vy) > -1:
-            vert_block = self.game.blocks.get((idx[0],idx[1]-np.sign(self.vy)), None)
-            if vert_block != None:
-                if np.sign(self.vy)*(self.y+np.sign(self.vy)*self.radius) > np.sign(self.vy)*(vert_block.y - np.sign(self.vy)*vert_block.h/2):
-                    if not vert_block.token:
-                        self.y = vert_block.y - np.sign(self.vy)*(vert_block.h/2+self.radius)
-                        self.vy*= -1
-                    else:
-                        self.game.add_ball()
-                    vert_block.hit()
-
-        new_pos = self.project_positions()
-
-        i_inc = np.sign(self.x % self.game.bwidth - self.game.bwidth/2)
-        j_inc = -np.sign(self.y % self.game.bwidth - self.game.bwidth/2)
-
-       
     def project_to_next_idx(self):
         new_x = self.x + self.vx*self.dt
         new_y = self.y + self.vy*self.dt
