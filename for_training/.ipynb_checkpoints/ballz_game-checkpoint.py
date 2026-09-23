@@ -26,14 +26,15 @@ class Vector:
     def __mul__(self, other): # same as self.dot()
         if isinstance(other, Vector):
             return self.x*other.x + self.y*other.y
-        elif isinstance(other, (int,float)):
+        else: # if isinstance(other, (int,float))
             return Vector(self.x*other, self.y*other)
 
     def __truediv__(self, k):
         return Vector(self.x/k, self.y/k)
 
 class Game: # holds everything
-    def __init__(self, width, height, nblocks):
+    def __init__(self, width, height, nblocks, seed=None):
+        np.random.seed(seed)
         # a dictionary mapping block index position to the block
         ## index position starts at (x,y) ~ (0,0)
         self.blocks = {} 
@@ -57,6 +58,8 @@ class Game: # holds everything
 
         self.num_new = 0
 
+        self.add_row()
+        
     def add_row(self):
         self.shift_down() # shift all other rows down
         empty_spaces = []
@@ -103,7 +106,7 @@ class Game: # holds everything
                 if not self.blocks[(i,j)].token:
                     self.game_over()
                 else:
-                    temp_blocks.pop((i,j+1))
+                    self.blocks[(i,j)].hit()
         self.blocks = temp_blocks
 
     def destroy_block(self, block):
@@ -131,11 +134,45 @@ class Game: # holds everything
         return (i, j)
 
     def g2scr_pos(self, pos):
-        return (pos[0], self.height - pos[1])
+        return (float(pos[0]), float(self.height - pos[1]))
 
     def game_over(self):
         pygame.event.post(pygame.event.Event(pygame.QUIT))
+        
+    def step(self, angle):
+        pygame.init()
+        self.launcher.unlock()
+        self.launcher.launch(angle)
+        frame_time = 0
+        clock = pygame.time.Clock()
+        terminated = False
+        running = True
+        while running:
+            frame_time += clock.get_time()
+            if len(self.launcher.queued) == self.launcher.tot_balls:
+                for _ in range(self.num_new):
+                    self.add_ball()
+                    self.num_new = 0
+                running = False
+                self.add_row()
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        terminated = True
+                self.launcher.unlock()
 
+            if not self.launcher.balls:
+                self.launcher.lock()
+
+            if frame_time >= 100 and len(self.launcher.balls) < self.launcher.tot_balls:
+                self.launcher.launch(angle)
+                frame_time = 0
+
+            for ball in self.balls:
+                ball.update()
+
+        pygame.quit()
+        return terminated
+                    
     def run(self):
         # pygame setup
         pygame.init()
@@ -143,10 +180,7 @@ class Game: # holds everything
         clock = pygame.time.Clock()
         running = True
         surface = pygame.Surface((self.width, self.height))
-        self.add_row()
 
-        angle = 0
-        min_tot = 1
         frame_time = 0 # time between frames
         while running:
             frame_time += clock.get_time()
@@ -187,7 +221,7 @@ class Game: # holds everything
 
             if not self.launcher.balls:
                 self.launcher.lock()
-            #print(frame_time, clock.get_time())
+
             if frame_time >= 100 and len(self.launcher.balls) < self.launcher.tot_balls:
                 self.launcher.launch(angle)
                 frame_time = 0
@@ -303,7 +337,6 @@ class Ball:
             self.vx = 0
             self.vy = 0
             self.game.launcher.return_ball(self)
-
         else: # position change by current velocity
             self.detect_collisions()
             self.x = self.x + self.vx * self.dt 
@@ -372,7 +405,8 @@ class Ball:
 
                         norm = Vector(self.x, self.y) - intersection
                         vel = Vector(self.vx, self.vy)
-                        proj_vel_norm = norm*((vel*norm)/norm.get_magnitude()**2) 
+                        proj_vel_norm = norm*((vel*norm)/norm.get_magnitude()**2)
+                        num_proj = ((vel*norm)/norm.get_magnitude()**2)
                         reflection = vel - proj_vel_norm*2
                         self.vx = reflection.x
                         self.vy = reflection.y
@@ -385,5 +419,6 @@ class Ball:
         return new_x, new_y
 
 if __name__ == "__main__":
-    game = Game(700, 950, 7)
-    game.run()
+    # game = Game(700, 950, 7)
+    # game.run()
+    pass
