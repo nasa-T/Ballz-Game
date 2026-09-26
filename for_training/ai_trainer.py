@@ -12,7 +12,7 @@ class BallzEnv(gym.Env):
         self.game = Game(width, height, nblocks)
 
         # grid dimensions with two channels (one for block health and one for tokens)
-        self.dims = (self.game.limit+1, self.game.nblocks, 2)
+        self.dims = (self.game.limit+2, self.game.nblocks, 2)
         self.blocks = np.zeros(self.dims, dtype=int)
         # self.tokens = np.zeros(self.dims, dtype=int)
 
@@ -80,10 +80,13 @@ class BallzEnv(gym.Env):
         return observation, self._get_info()
         
     def step(self, action):
-        game_over = self.game.step(np.pi/2*action)
+        render=False
+        if self.render_mode == "human":
+            render=True
+        game_over = self.game.step(np.pi/2*action, render=render)
         observation = self._get_obs()
 
-        reward = 1/self.game.limit if not game_over else -1
+        reward = 1 if not game_over else -self.game.limit
 
         terminated = (self.game.index >= 1000) or game_over
         info = self._get_info()
@@ -175,29 +178,25 @@ class BallzAgent(models.Model):
         rewards = []
         for _ in range(n_episodes):
             state, info = self.env.reset()
-            state_tensor = self.forward(state)
-            episode_reward, new_state = self.run_episode(state_tensor)
-
+            episode_reward, new_state = self.run_episode(state)
+            rewards.append(episode_reward)
 
         return rewards
 
-    def run_episode(self, state_tensor):
+    def run_episode(self, state):
         terminated = False
         tot_reward = 0
         while not terminated:
             with tf.GradientTape() as actor_tape, tf.GradientTape() as critic_tape, tf.GradientTape() as cnn_tape:
+                state_tensor = self.forward(state)
                 # Actor mean and std prediction assuming gaussian distribution
                 a_mean, a_std = self.actor(state_tensor)[0]
-                print("m,std: ", a_mean, a_std)
-                action = np.clip(np.random.normal(a_mean, np.abs(a_std)), a_min=-0.9, a_max=0.9) # sample from gaussian
-                print("action: ", action)
+                action = np.clip(np.random.normal(a_mean, np.abs(a_std)), a_min=-0.99, a_max=0.99) # sample from gaussian
                 observation, reward, terminated, _, info = self.env.step(action)
-                print("reward: ", reward)
                 new_state_tensor = self.forward(observation) # observation as a tensor
 
                 curr_val = self.critic(state_tensor)[0][0]
                 next_val = self.critic(new_state_tensor)[0][0]
-                print(curr_val, next_val+reward)
 
                 if terminated:
                     # no next state exists
@@ -210,8 +209,11 @@ class BallzAgent(models.Model):
 
                 # log of the probability density for a gaussian
                 log_pi = lambda x: tf.math.log(1/(a_std*np.sqrt(2*np.pi))) - tf.math.square(x - a_mean)/(2*tf.math.square(a_std)) 
-                actor_loss = log_pi(action) * tf.stop_gradient(advantage)
+                actor_loss = -log_pi(action) * tf.stop_gradient(advantage)
                 critic_loss = tf.math.square(advantage)
+                actor_tape.watch(actor_loss)
+                critic_tape.watch(critic_loss)
+                cnn_tape.watch(critic_loss)
 
             # use critic loss to update cnn featureinator
             cnn_gradient = cnn_tape.gradient(critic_loss, self.cnn.trainable_weights)
@@ -222,7 +224,6 @@ class BallzAgent(models.Model):
             a_gradient = actor_tape.gradient(actor_loss, self.actor.trainable_weights)
             self.a_optimizer.apply_gradients(zip(a_gradient, self.actor.trainable_weights))
 
-            print(reward,terminated)
             state_tensor = new_state_tensor
             tot_reward += reward
 

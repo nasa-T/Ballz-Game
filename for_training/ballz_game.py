@@ -139,7 +139,7 @@ class Game: # holds everything
     def game_over(self):
         pygame.event.post(pygame.event.Event(pygame.QUIT))
         
-    def step(self, angle):
+    def step(self, angle, render=False):
         pygame.init()
         self.launcher.unlock()
         self.launcher.launch(angle)
@@ -147,6 +147,9 @@ class Game: # holds everything
         clock = pygame.time.Clock()
         terminated = False
         running = True
+
+        if render:
+            screen = pygame.display.set_mode((self.width, self.height))
         while running:
             frame_time += clock.get_time()
             if len(self.launcher.queued) == self.launcher.tot_balls:
@@ -170,9 +173,42 @@ class Game: # holds everything
             for ball in self.balls:
                 ball.update()
 
+            if render:
+                screen.fill("black")
+                self.render(screen)
+                clock.tick(600)
+
         pygame.quit()
         return terminated
                     
+    def render(self, screen):
+        surface = pygame.Surface((self.width, self.height))
+        
+        font_obj = pygame.font.SysFont("Arial", 64, bold=True)
+        text_surface_obj = font_obj.render(str(self.index), True, (255,255,255), (0,0,0))
+        screen.blit(text_surface_obj, (self.width/2, self.bwidth/4))
+
+        for ball in self.balls:
+            ball.update()
+            pygame.draw.circle(screen, (255,255,255), self.g2scr_pos((ball.x,ball.y)), self.ball_rad)
+
+        # render the game
+        for b_loc in self.blocks:
+            block = self.blocks[b_loc]
+            if not block.token:
+                rect = pygame.Rect(block.x-block.w/2, self.height-(block.y+block.h/2), block.w, block.h)
+                pygame.draw.rect(screen, (255,0,0), rect)
+                font_obj = pygame.font.SysFont("Arial", 64, bold=True)
+                text_surface_obj = font_obj.render(str(block.health), True, (0,0,0), (255,0,0))
+                screen.blit(text_surface_obj, np.array(rect.center) - np.array(font_obj.size(str(block.health)))/2)
+            elif block.token:
+                pygame.draw.circle(screen, (255,255,0), self.g2scr_pos(self.idx_to_pos(b_loc)), self.bwidth/4)
+
+        # flip() the display to put your work on screen
+        pygame.display.flip()
+
+
+
     def run(self):
         # pygame setup
         pygame.init()
