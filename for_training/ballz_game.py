@@ -106,7 +106,8 @@ class Game: # holds everything
                 if not self.blocks[(i,j)].token:
                     self.game_over()
                 else:
-                    self.blocks[(i,j)].hit()
+                    temp_blocks.pop((i,j+1))
+                    #self.blocks[(i,j)].hit()
         self.blocks = temp_blocks
 
     def destroy_block(self, block):
@@ -139,19 +140,22 @@ class Game: # holds everything
     def game_over(self):
         pygame.event.post(pygame.event.Event(pygame.QUIT))
         
-    def step(self, angle, render=False):
-        pygame.init()
+    def step(self, angle, render=False, screen=None):
+        # if render:
+        #     pygame.init()
         self.launcher.unlock()
         self.launcher.launch(angle)
         frame_time = 0
+        tot_time = 0
         clock = pygame.time.Clock()
         terminated = False
         running = True
 
-        if render:
-            screen = pygame.display.set_mode((self.width, self.height))
+        # if render:
+        #     screen = pygame.display.set_mode((self.width, self.height))
         while running:
             frame_time += clock.get_time()
+            tot_time += 1
             if len(self.launcher.queued) == self.launcher.tot_balls:
                 for _ in range(self.num_new):
                     self.add_ball()
@@ -178,8 +182,8 @@ class Game: # holds everything
                 self.render(screen)
                 clock.tick(600)
 
-        pygame.quit()
-        return terminated
+        #pygame.quit()
+        return terminated, tot_time
                     
     def render(self, screen):
         surface = pygame.Surface((self.width, self.height))
