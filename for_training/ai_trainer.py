@@ -102,11 +102,12 @@ class BallzEnv(gym.Env):
         observation = self._get_obs()
 
         # change in tot health between steps decreasing penalty of increasing total blocks with 0.5 factor
-        new_block_tot = np.sum(observation["blocks"])
-        block_change = self.block_total - observation["nballs"]/self.game.index/1.5*new_block_tot
-        bonus = self.game.index if new_block_tot < self.game.index and not game_over else 0
+        new_block_tot = np.sum(observation["blocks"][:,:,0])
+        block_change = self.block_total*(self.game.index-1) - new_block_tot*(self.game.index)*0.75
+        bonus = self.game.index if new_block_tot < 4 and not game_over else 0
         # - 0.1*sub_steps/observation['nballs']
-        reward = 1.0 + block_change/2 + bonus if not game_over else self.game.index - 4*self.game.limit
+        print(bonus, new_block_tot)
+        reward = 1.0 + block_change + bonus if not game_over else self.game.index - 4*self.game.limit
         self.block_total = new_block_tot
 
         terminated = (self.game.index >= 1000) or game_over
@@ -218,6 +219,9 @@ class BallzAgent(models.Model):
     
         for _ in range(n_episodes):
             try: 
+                fig = self.ax[0].get_figure()
+                fig.patch.set_facecolor("black")
+                self.ax[0].set_facecolor("black")
                 state, info = self.env.reset()
                 episode_reward, new_state, score = self.run_episode(state, live_plot=live_plot)
                 #self.cnn.save('models/feature_extractor.keras')
@@ -227,13 +231,10 @@ class BallzAgent(models.Model):
                 self.scores.append(score)
                 #ani = FuncAnimation(self.fig, self.animate,cache_frame_data=False)
                 # ax = plt.gca()
-                fig = self.ax[0].get_figure()
-                fig.patch.set_facecolor("black")
-                self.ax[0].set_facecolor("black")
                 self.ax[0].lines[0].set_xdata(range(len(self.rewards)))
                 self.ax[0].lines[1].set_xdata(range(len(self.scores)))
-                self.ax[0].lines[0].set_ydata(self.rewards) 
-                self.ax[0].lines[1].set_ydata(self.scores)
+                self.ax[0].lines[0].set_ydata(np.array(self.rewards) /np.array(self.scores))
+                self.ax[0].lines[1].set_ydata(np.array(self.scores))
                 self.ax[0].lines[0].set_color("green")
                 self.ax[0].lines[1].set_color("red")
                 self.ax[0].spines['bottom'].set_color("green")
@@ -280,7 +281,7 @@ class BallzAgent(models.Model):
                 # Actor mean and std prediction assuming gaussian distribution
                 a_mean, a_std = self.actor(state_tensor)[0]
                 # action = np.clip(np.random.normal(a_mean, np.abs(a_std))/2, a_min=-0.95, a_max=0.95) # sample from gaussian
-                action = np.clip(np.random.normal(a_mean, 0.2), a_min=-0.99, a_max=0.99) # sample from gaussian
+                action = np.clip(np.random.normal(a_mean, tf.abs(a_std)), a_min=-0.99, a_max=0.99) # sample from gaussian
                 if np.isnan(action):
                     action = 0.0
                 observation, reward, terminated, _, info = self.env.step(action)
