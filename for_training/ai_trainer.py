@@ -103,10 +103,11 @@ class BallzEnv(gym.Env):
 
         # change in tot health between steps decreasing penalty of increasing total blocks with 0.5 factor
         new_block_tot = np.sum(observation["blocks"])
-        block_change = self.block_total - observation["nballs"]/self.game.index*new_block_tot
-        self.block_total = new_block_tot
+        block_change = self.block_total - observation["nballs"]/self.game.index/1.5*new_block_tot
+        bonus = self.game.index if new_block_tot < self.game.index and not game_over else 0
         # - 0.1*sub_steps/observation['nballs']
-        reward = 1.0 + block_change/2 if not game_over else -3*self.game.limit
+        reward = 1.0 + block_change/2 + bonus if not game_over else self.game.index - 4*self.game.limit
+        self.block_total = new_block_tot
 
         terminated = (self.game.index >= 1000) or game_over
         info = self._get_info()
@@ -192,8 +193,10 @@ class BallzAgent(models.Model):
         self.a_losses = []
         self.c_losses = []
         self.rewards = []
+        self.scores = []
         self.fig = None
         self.ax = None
+        self.recent_rewards = []
 
     def forward(self, obs_space):
         flat_blocks = self.cnn(tf.constant([obs_space["blocks"]]))
@@ -204,19 +207,43 @@ class BallzAgent(models.Model):
     def train(self, n_episodes=1000, live_plot=False):
         # rewards = []
         if live_plot and self.fig == None and self.ax == None:
-            self.fig, self.ax = plt.subplots()
-            line, = self.ax.plot(self.rewards)
-            
+            self.fig, self.ax = plt.subplots(2,1)
+            line, = self.ax[0].plot(self.rewards)
+            line, = self.ax[0].plot(self.scores)
+            line, = self.ax[1].plot(self.recent_rewards)
+            plt.rcParams['text.color'] = '#00FF00'
+            plt.rcParams['axes.labelcolor'] = '#00FF00'
+            plt.rcParams['xtick.color'] = '#00FF00'
+            plt.rcParams['ytick.color'] = '#00FF00'
+    
         for _ in range(n_episodes):
             try: 
                 state, info = self.env.reset()
-                episode_reward, new_state = self.run_episode(state)
+                episode_reward, new_state, score = self.run_episode(state, live_plot=live_plot)
                 #self.cnn.save('models/feature_extractor.keras')
                 #self.critic.save('models/critic.keras')
                 #self.actor.save('models/actor.keras')
                 self.rewards.append(episode_reward)
+                self.scores.append(score)
                 #ani = FuncAnimation(self.fig, self.animate,cache_frame_data=False)
-                plt.gca().lines[0].set_xdata(range(len(self.rewards))); plt.gca().lines[0].set_ydata(self.rewards); plt.gca().relim(); plt.gca().autoscale_view(); plt.pause(0.01);
+                # ax = plt.gca()
+                fig = self.ax[0].get_figure()
+                fig.patch.set_facecolor("black")
+                self.ax[0].set_facecolor("black")
+                self.ax[0].lines[0].set_xdata(range(len(self.rewards)))
+                self.ax[0].lines[1].set_xdata(range(len(self.scores)))
+                self.ax[0].lines[0].set_ydata(self.rewards) 
+                self.ax[0].lines[1].set_ydata(self.scores)
+                self.ax[0].lines[0].set_color("green")
+                self.ax[0].lines[1].set_color("red")
+                self.ax[0].spines['bottom'].set_color("green")
+                self.ax[0].spines['top'].set_color("green")
+                self.ax[0].spines['left'].set_color("green")
+                self.ax[0].spines['right'].set_color("green")
+                self.ax[0].tick_params(labelcolor="green", color="green")
+                self.ax[0].relim(); self.ax[0].autoscale_view(); 
+                plt.pause(0.01);
+
 
             except Exception as e:
                 self.env.close()
@@ -229,22 +256,35 @@ class BallzAgent(models.Model):
         self.ax.plot(range(len(self.rewards)),self.rewards)
         plt.show()
 
-    def run_episode(self, state):
+    def run_episode(self, state, live_plot=False):
         terminated = False
         tot_reward = 0
+        score = 0
+        self.recent_rewards = []
         while not terminated:
+            if live_plot:
+                self.ax[1].set_facecolor("black")
+                self.ax[1].lines[0].set_xdata(range(len(self.recent_rewards)))
+                self.ax[1].lines[0].set_ydata(self.recent_rewards) 
+                self.ax[1].lines[0].set_color("green")
+                self.ax[1].spines['bottom'].set_color("green")
+                self.ax[1].spines['top'].set_color("green")
+                self.ax[1].spines['left'].set_color("green")
+                self.ax[1].spines['right'].set_color("green")
+                self.ax[1].tick_params(labelcolor="green", color="green")
+                self.ax[1].relim(); self.ax[1].autoscale_view(); 
+                plt.pause(0.001)
             # self.learning_rate = np.clip(self.learning_rate*1.05, a_min=0, a_max=1e-3)
             with tf.GradientTape() as actor_tape, tf.GradientTape() as critic_tape, tf.GradientTape() as cnn_tape:
                 state_tensor = self.forward(state)
                 # Actor mean and std prediction assuming gaussian distribution
                 a_mean, a_std = self.actor(state_tensor)[0]
                 # action = np.clip(np.random.normal(a_mean, np.abs(a_std))/2, a_min=-0.95, a_max=0.95) # sample from gaussian
-                action = np.clip(np.random.normal(a_mean, 0.2), a_min=-0.95, a_max=0.95) # sample from gaussian
-                print(a_mean.numpy(),a_std.numpy(),action)
+                action = np.clip(np.random.normal(a_mean, 0.2), a_min=-0.99, a_max=0.99) # sample from gaussian
                 if np.isnan(action):
                     action = 0.0
                 observation, reward, terminated, _, info = self.env.step(action)
-                print("reward:", reward, tot_reward)
+                self.recent_rewards.append(reward)
                 new_state_tensor = self.forward(observation) # observation as a tensor
 
                 curr_val = self.critic(state_tensor)[0][0]
@@ -262,11 +302,10 @@ class BallzAgent(models.Model):
                 # log of the probability density for a gaussian
                 log_pi = lambda x: tf.math.log(1/(tf.abs(a_std)*np.sqrt(2*np.pi))) - tf.square(x - a_mean)/(2*tf.math.square(a_std)) 
                 actor_loss = -log_pi(action) * tf.stop_gradient(advantage)
-                print("a_loss: ", actor_loss)
                 critic_loss = tf.math.square(advantage)
-                actor_tape.watch(actor_loss)
-                critic_tape.watch(critic_loss)
-                cnn_tape.watch(critic_loss)
+                # actor_tape.watch(actor_loss)
+                # critic_tape.watch(critic_loss)
+                # cnn_tape.watch(critic_loss)
 
                 self.a_losses.append(actor_loss)
                 self.c_losses.append(critic_loss)
@@ -280,7 +319,9 @@ class BallzAgent(models.Model):
             a_gradient = actor_tape.gradient(actor_loss, self.actor.trainable_weights)
             self.a_optimizer.apply_gradients(zip(a_gradient, self.actor.trainable_weights))
 
+            score = info['score']
+
             state_tensor = new_state_tensor
             tot_reward += reward
 
-        return tot_reward, state_tensor 
+        return tot_reward, state_tensor, score 
