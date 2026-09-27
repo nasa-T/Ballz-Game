@@ -61,7 +61,7 @@ class Game: # holds everything
         self.add_row()
         
     def add_row(self):
-        self.shift_down() # shift all other rows down
+        game_over = self.shift_down() # shift all other rows down
         empty_spaces = []
         token_loc = -1
         if self.index > 1:
@@ -92,8 +92,11 @@ class Game: # holds everything
                 rem_loc = np.random.randint(0,self.nblocks)
             self.destroy_block(self.blocks[(rem_loc,1)])
 
+        return game_over
+
     def shift_down(self):
         self.index += 1
+        game_over = False
         # in order to avoid overwriting blocks, we create another 
         ## dictionary to temporarily store blocks
         temp_blocks = {}
@@ -104,11 +107,13 @@ class Game: # holds everything
             temp_blocks[(i,j+1)] = self.blocks[(i,j)]
             if j+1 == self.limit:
                 if not self.blocks[(i,j)].token:
-                    self.game_over()
+                    # self.game_over()
+                    game_over = True
                 else:
                     temp_blocks.pop((i,j+1))
                     #self.blocks[(i,j)].hit()
         self.blocks = temp_blocks
+        return game_over
 
     def destroy_block(self, block):
         self.blocks.pop(self.pos_to_idx((block.x,block.y)),0)
@@ -161,10 +166,10 @@ class Game: # holds everything
                     self.add_ball()
                     self.num_new = 0
                 running = False
-                self.add_row()
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        terminated = True
+                terminated = self.add_row()
+                # for event in pygame.event.get():
+                #     if event.type == pygame.QUIT:
+                #         terminated = True
                 self.launcher.unlock()
 
             if not self.launcher.balls:
@@ -181,6 +186,8 @@ class Game: # holds everything
                 screen.fill("black")
                 self.render(screen)
                 clock.tick(600)
+            else:
+                clock.tick(20000)
 
         #pygame.quit()
         return terminated, tot_time
