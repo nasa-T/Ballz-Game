@@ -28,8 +28,9 @@ class BallzEnv(gym.Env):
         blocks_space = spaces.Box(low=0, high=1, shape=self.dims, dtype=np.float32)
         # token_space = spaces.Box(low=0, high=1, shape=self.dims, dtype=int)
         # spaces.MultiBinary(self.dims) 
-        nballs_space = spaces.Box(low=0, high=10000, shape=(), dtype=int)
-        pos_space = spaces.Box(low=0, high=width, shape=(), dtype=int)
+        nballs_space = spaces.Box(low=0, high=1, shape=(), dtype=np.float32)
+        pos_space = spaces.Box(low=0, high=1, shape=(), dtype=np.float32)
+        indx_space = spaces.Box(low=1, high=10000, shape=(), dtype=int)
         
         self.pos = self.game.launcher.x # launcher position
         self.nballs = len(self.game.balls) # number of balls
@@ -59,11 +60,11 @@ class BallzEnv(gym.Env):
             blocks[block_coord[1], block_coord[0], 1] = np.float32(block.token)
             # tokens[block_coord[::-1]] = int(block.token)
         if np.max(blocks[:,:,0]) > 0:
-            blocks[:,:,0] = blocks[:,:,0]/np.max(blocks[:,:,0])
+            blocks[:,:,0] = blocks[:,:,0]/self.game.index
         self.blocks = blocks
         # self.tokens = tokens
-        self.nballs = len(self.game.balls)
-        self.pos = self.game.launcher.x
+        self.nballs = len(self.game.balls)/self.game.index
+        self.pos = self.game.launcher.x/self.width
             
         observation = {
             "blocks": self.blocks,
@@ -101,12 +102,19 @@ class BallzEnv(gym.Env):
         game_over, sub_steps = self.game.step(np.pi/2*action, render=render, screen=self.window)
         observation = self._get_obs()
 
-        # change in tot health between steps decreasing penalty of increasing total blocks with 0.5 factor
+        # change in tot health between steps decreasing penalty of increasing total blocks with 0.9 factor
         new_block_tot = np.sum(observation["blocks"][:,:,0])
-        block_change = self.block_total*(self.game.index-1) - new_block_tot*(self.game.index)*0.9
-        bonus = self.game.index/2 if new_block_tot < 2 and not game_over else 0
+        block_change = self.block_total - new_block_tot*0.99
+        bonus = self.game.index if new_block_tot < 2 and not game_over else 0
         # - 0.1*sub_steps/observation['nballs']
-        reward = 1.1*self.game.index + block_change + bonus if not game_over else self.game.index - 2*self.game.limit
+        # reward = (1.1*self.game.index + block_change + bonus)/observation["nballs"] if not game_over else (self.game.index - 2*self.game.limit)/observation["nballs"]
+        #reward = 1 + block_change if not game_over else -self.game.limit
+        block_locs = np.array(list(self.game.blocks.keys()))
+        if len(block_locs) > 0:
+            impending_doom = -1.75*np.max(block_locs[:,1])/self.game.limit
+        else:
+            impending_doom = 0
+        reward = 1.25 + impending_doom if not game_over else -1
         self.block_total = new_block_tot
 
         terminated = (self.game.index >= 1000) or game_over
@@ -154,6 +162,8 @@ class BallzEnv(gym.Env):
     def close(self):
         pygame.display.quit()
         pygame.quit()
+        self.window = None
+        self.clock = None
 
 class BallzAgent(models.Model):
     def __init__(self, env):
@@ -162,8 +172,8 @@ class BallzAgent(models.Model):
         self.grid_dims = obs_space["blocks"].shape
         self.cnn = models.Sequential([
              layers.Input(self.grid_dims, name='Input'),
-             layers.Conv2D(24, (3,2), padding='same', activation='relu', name='Conv2d Layer 1'),
-             layers.Conv2D(32, (3,2), padding='same', activation='relu', name='Conv2d Layer 2'),
+             layers.Conv2D(24, (2,2), padding='same', activation='relu', name='Conv2d Layer 1'),
+             layers.Conv2D(32, (2,2), padding='same', activation='relu', name='Conv2d Layer 2'),
              layers.Flatten(),
              layers.Dense(20, activation='relu')
             ])
@@ -172,15 +182,15 @@ class BallzAgent(models.Model):
         
         self.actor = models.Sequential([
                 layers.Input(shape=(self.obs_flat_shape,), name='Input'),
-                layers.Dense(42, activation='tanh'),
-                layers.Dense(60, activation='relu'),
+                layers.Dense(32, activation='tanh'),
+                layers.Dense(32, activation='relu'),
                 layers.Dense(2, activation='tanh')
             ])
 
         self.critic = models.Sequential([
                 layers.Input(shape=(self.obs_flat_shape,), name='Input'),
-                layers.Dense(42, activation='relu'),
-                layers.Dense(64, activation='relu'),
+                layers.Dense(32, activation='relu'),
+                layers.Dense(32, activation='relu'),
                 layers.Dense(1)
             ])
 
@@ -189,7 +199,7 @@ class BallzAgent(models.Model):
         self.a_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         self.c_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate*3)
 
-        self.gamma = 0.99
+        self.gamma = 0.9
 
         self.a_losses = []
         self.c_losses = []
@@ -245,7 +255,7 @@ class BallzAgent(models.Model):
                     self.ax[0].axhline(ls='--')
                     self.ax[0].lines[0].set_xdata(range(len(self.rewards)))
                     self.ax[0].lines[1].set_xdata(range(len(self.scores)))
-                    self.ax[0].lines[0].set_ydata(np.array(self.rewards) /np.array(self.scores))
+                    self.ax[0].lines[0].set_ydata(np.array(self.rewards))
                     self.ax[0].lines[1].set_ydata(np.array(self.scores))
                     self.ax[0].lines[0].set_color("green")
                     self.ax[0].lines[1].set_color("red")
@@ -276,6 +286,7 @@ class BallzAgent(models.Model):
         terminated = False
         tot_reward = 0
         score = 0
+        discount = 1
         self.recent_rewards = []
         self.recent_mean_action = []
         self.recent_std_action = []
@@ -326,14 +337,16 @@ class BallzAgent(models.Model):
                 plt.pause(0.001)
             # self.learning_rate = np.clip(self.learning_rate*1.05, a_min=0, a_max=1e-3)
 
-            with tf.GradientTape() as actor_tape, tf.GradientTape() as critic_tape, tf.GradientTape() as cnn_tape:
+            with tf.GradientTape() as actor_tape, tf.GradientTape() as critic_tape, tf.GradientTape(persistent=True) as cnn_tape:
                 state_tensor = self.forward(state)
                 # Actor mean and std prediction assuming gaussian distribution
                 a_mean, a_std = self.actor(state_tensor)[0]
                 # action = np.clip(np.random.normal(a_mean, np.abs(a_std))/2, a_min=-0.95, a_max=0.95) # sample from gaussian
-                a_std = tf.math.maximum(1e-6, tf.abs(a_std))
-                action = np.clip(np.random.normal(a_mean, a_std), a_min=-0.99, a_max=0.99) # sample from gaussian
-                action = tf.math.tanh(action)
+                # a_std = tf.math.maximum(1e-3, tf.abs(a_std))
+                a_std = tf.math.exp(a_std)
+
+                pre_norm_action = tf.random.normal([1],a_mean, a_std)[0] # sample from gaussian
+                action = 0.95*tf.math.tanh(pre_norm_action)
                 if np.isnan(action):
                     raise Exception("Action is nan, something went awry.")
                 observation, reward, terminated, _, info = self.env.step(action)
@@ -350,34 +363,35 @@ class BallzAgent(models.Model):
                     target = reward
                 else:
                     # what the predicted reward actually is given next state
-                    target = reward + self.gamma*next_val
+                    target = tf.stop_gradient(reward + self.gamma*next_val)
 
                 advantage = target - curr_val
-
                 # log of the probability density for a truncated gaussian
                 phi = lambda x: 1/tf.sqrt(2*np.pi) * tf.exp(-1/2 * x**2)
                 PHI = lambda x: 1/2*(1 + tf.math.erf(x/np.sqrt(2)))
                 inp = lambda x: (tf.cast(x, tf.float32) - a_mean)/a_std
-                log_pi = lambda x: tf.math.log( 1/a_std*phi(inp(x))/(PHI(inp(0.99)) - PHI(inp(-0.99))) )
-                # log_pi = lambda x: tf.math.log(1/(tf.abs(a_std)*np.sqrt(2*np.pi))) - tf.square(x - a_mean)/(2*tf.math.square(a_std)) 
-                actor_loss = -log_pi(action) * tf.stop_gradient(advantage)
+                # log_pi = lambda x: tf.math.log( 1/a_std*phi(inp(x))/(PHI(inp(0.99)) - PHI(inp(-0.99))) )
+                log_pi = lambda x: tf.math.log(1/(tf.abs(a_std)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - a_mean)/(2*tf.math.square(a_std)) 
+                log_prob = log_pi(pre_norm_action)
+                actor_loss = -discount*log_prob * tf.stop_gradient(advantage)
                 #actor_loss = -log_pi(action) * target
                 critic_loss = tf.math.square(advantage)
-                # actor_tape.watch(actor_loss)
-                # critic_tape.watch(critic_loss)
-                # cnn_tape.watch(critic_loss)
-
+                joint_loss = tf.add(actor_loss, critic_loss)
                 self.a_losses.append(actor_loss)
                 self.c_losses.append(critic_loss)
 
-            # use critic loss to update cnn featureinator
-            cnn_gradient = cnn_tape.gradient(actor_loss, self.cnn.trainable_weights)
-            self.cnn_optimizer.apply_gradients(zip(cnn_gradient, self.cnn.trainable_weights))
+                # print("T,V:", target,curr_val.numpy())
+                #print("A,R,L:", advantage.numpy(), reward, critic_loss.numpy())
+
             # update critic and actor
             c_gradient = critic_tape.gradient(critic_loss, self.critic.trainable_weights)
             self.c_optimizer.apply_gradients(zip(c_gradient, self.critic.trainable_weights))
             a_gradient = actor_tape.gradient(actor_loss, self.actor.trainable_weights)
             self.a_optimizer.apply_gradients(zip(a_gradient, self.actor.trainable_weights))
+            # use joint loss to update cnn featureinator
+            cnn_gradient = cnn_tape.gradient(joint_loss, self.cnn.trainable_weights)
+            self.cnn_optimizer.apply_gradients(zip(cnn_gradient, self.cnn.trainable_weights))
+            discount *= self.gamma
 
             score = info['score']
 
