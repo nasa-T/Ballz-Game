@@ -79,7 +79,7 @@ class BallzEnv(gym.Env):
             
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-
+        self.terminated = False
         # self.window = None
         self.clock = None
         game_seed = seed if seed is not None else self.np_random.integers(0, 2**32 - 1)
@@ -89,6 +89,9 @@ class BallzEnv(gym.Env):
         return observation, self._get_info()
         
     def step(self, action):
+        if self.terminated:
+            return self._get_obs(), 0, self.terminated, False, self._get_info()
+
         render=False
         if self.render_mode == "human":
             render=True
@@ -101,10 +104,10 @@ class BallzEnv(gym.Env):
             self.clock = pygame.time.Clock()
         game_over, sub_steps = self.game.step(np.pi/2*action, render=render, screen=self.window)
         observation = self._get_obs()
-
+        self.terminated = game_over
         # change in tot health between steps decreasing penalty of increasing total blocks with 0.9 factor
         new_block_tot = np.sum(observation["blocks"][:,:,0])
-        block_change = self.block_total - new_block_tot*0.99
+        block_change = self.block_total - new_block_tot*0.9
         bonus = self.game.index if new_block_tot < 2 and not game_over else 0
         # - 0.1*sub_steps/observation['nballs']
         # reward = (1.1*self.game.index + block_change + bonus)/observation["nballs"] if not game_over else (self.game.index - 2*self.game.limit)/observation["nballs"]
@@ -114,7 +117,8 @@ class BallzEnv(gym.Env):
             impending_doom = -1.75*np.max(block_locs[:,1])/self.game.limit
         else:
             impending_doom = 0
-        reward = 1.25 + impending_doom if not game_over else -1
+        # reward = 1.25 + block_change + bonus if not game_over else -1
+        reward = 1 if not game_over else -self.game.limit
         self.block_total = new_block_tot
 
         terminated = (self.game.index >= 1000) or game_over
@@ -166,40 +170,47 @@ class BallzEnv(gym.Env):
         self.clock = None
 
 class BallzAgent(models.Model):
-    def __init__(self, env):
+    def __init__(self, env, alpha=1e-4, gamma=0.9, epsilon=0.2):
         self.env = env
         obs_space = env.observation_space
-        self.grid_dims = obs_space["blocks"].shape
+        if isinstance(env, gym.vector.SyncVectorEnv):
+            self.grid_dims = obs_space["blocks"].shape[1:]
+            self.batch_size = obs_space["blocks"].shape[0]
+        else:
+            self.grid_dims = obs_space["blocks"].shape
+            self.batch_size = 1
+
         self.cnn = models.Sequential([
-             layers.Input(self.grid_dims, name='Input'),
-             layers.Conv2D(24, (2,2), padding='same', activation='relu', name='Conv2d Layer 1'),
-             layers.Conv2D(32, (2,2), padding='same', activation='relu', name='Conv2d Layer 2'),
+             layers.Input(self.grid_dims, name='Input', batch_size=self.batch_size),
+             layers.Conv2D(24, (4,3), padding='same', activation='relu', name='Conv2d_Layer_1'),
+             layers.Conv2D(32, (4,3), padding='same', activation='relu', name='Conv2d_Layer_2'),
              layers.Flatten(),
-             layers.Dense(20, activation='relu')
+             # layers.Dense(20, activation='relu')
             ])
 
         self.obs_flat_shape = self.cnn.output_shape[-1] + len(obs_space)-1
         
         self.actor = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input'),
-                layers.Dense(32, activation='tanh'),
-                layers.Dense(32, activation='relu'),
+                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=self.batch_size),
+                layers.Dense(24, activation='tanh'),
+                layers.Dense(24, activation='relu'),
                 layers.Dense(2, activation='tanh')
             ])
 
         self.critic = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input'),
-                layers.Dense(32, activation='relu'),
-                layers.Dense(32, activation='relu'),
+                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=self.batch_size),
+                layers.Dense(24, activation='relu'),
+                layers.Dense(24, activation='relu'),
                 layers.Dense(1)
             ])
 
-        self.learning_rate = 1e-4
+        self.learning_rate = alpha
         self.cnn_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         self.a_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         self.c_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate*3)
 
-        self.gamma = 0.9
+        self.gamma = gamma
+        self.epsilon = epsilon
 
         self.a_losses = []
         self.c_losses = []
@@ -212,10 +223,16 @@ class BallzAgent(models.Model):
         self.recent_mean_action = []
         self.recent_std_action = []
 
+    @tf.function
     def forward(self, obs_space):
-        flat_blocks = self.cnn(tf.constant([obs_space["blocks"]]))
-        scalar_tensor = tf.stack([obs_space["nballs"], obs_space["position"]],0)
-        state_tensor = tf.concat([flat_blocks, [scalar_tensor]], 1)
+        if isinstance(self.env, gym.vector.SyncVectorEnv):
+            flat_blocks = self.cnn(obs_space["blocks"])
+            scalar_tensor = tf.stack([obs_space["nballs"], obs_space["position"]],1)
+            state_tensor = tf.concat([flat_blocks, scalar_tensor], 1)
+        else:
+            flat_blocks = self.cnn([obs_space["blocks"]])
+            scalar_tensor = tf.stack([obs_space["nballs"], obs_space["position"]],0)
+            state_tensor = tf.concat([flat_blocks, [scalar_tensor]], 1)
         return state_tensor
         
     def train(self, n_episodes=1000, live_plot=False):
@@ -243,6 +260,7 @@ class BallzAgent(models.Model):
                     fig.patch.set_facecolor("black")
                     self.ax[0].set_facecolor("black")
                 state, info = self.env.reset()
+
                 episode_reward, new_state, score = self.run_episode(state, live_plot=live_plot)
                 #self.cnn.save('models/feature_extractor.keras')
                 #self.critic.save('models/critic.keras')
@@ -282,15 +300,18 @@ class BallzAgent(models.Model):
         self.ax.plot(range(len(self.rewards)),self.rewards)
         plt.show()
 
-    def run_episode(self, state, live_plot=False):
-        terminated = False
+    def run_episode(self, state, live_plot=False, ppo=False):
+        terminated = np.array([False]*self.batch_size)
         tot_reward = 0
         score = 0
         discount = 1
         self.recent_rewards = []
         self.recent_mean_action = []
         self.recent_std_action = []
-        while not terminated:
+        prev_state_action_prob = None
+        prev_mean = 1
+        prev_std = 1
+        while not terminated.all():
             if live_plot:
                 self.ax[1].set_facecolor("black")
                 self.ax[1].axhline(ls='--')
@@ -345,11 +366,14 @@ class BallzAgent(models.Model):
                 # a_std = tf.math.maximum(1e-3, tf.abs(a_std))
                 a_std = tf.math.exp(a_std)
 
-                pre_norm_action = tf.random.normal([1],a_mean, a_std)[0] # sample from gaussian
+                pre_norm_action = tf.random.normal([self.batch_size],a_mean, a_std) # sample from gaussian
                 action = 0.95*tf.math.tanh(pre_norm_action)
-                if np.isnan(action):
-                    raise Exception("Action is nan, something went awry.")
-                observation, reward, terminated, _, info = self.env.step(action)
+                # if np.isnan(action):
+                #     raise Exception("Action is nan, something went awry.")
+                if isinstance(self.env, gym.vector.SyncVectorEnv):
+                    observation, reward, terminated, _, info = self.env.step(action)
+                else:
+                    observation, reward, terminated, _, info = self.env.step(action[0])
                 self.recent_rewards.append(reward)
                 self.recent_mean_action.append(a_mean)
                 self.recent_std_action.append(a_std)
@@ -358,12 +382,22 @@ class BallzAgent(models.Model):
                 curr_val = self.critic(state_tensor)[0][0]
                 next_val = self.critic(new_state_tensor)[0][0]
 
-                if terminated:
-                    # no next state exists
-                    target = reward
+                if not isinstance(self.env, gym.vector.SyncVectorEnv):
+                    if terminated:
+                        # no next state exists
+                        target = reward
+                    else:
+                        # what the predicted reward actually is given next state
+                        target = tf.stop_gradient(reward + discount*next_val)
                 else:
-                    # what the predicted reward actually is given next state
-                    target = tf.stop_gradient(reward + self.gamma*next_val)
+                    target = []
+                    for i in terminated:
+                        if i:
+                            target.append(reward)
+                        else:
+                            target.append(tf.stop_gradient(reward + discount*next_val))
+
+                target = tf.Variable(target, dtype=tf.float32)
 
                 advantage = target - curr_val
                 # log of the probability density for a truncated gaussian
@@ -372,8 +406,16 @@ class BallzAgent(models.Model):
                 inp = lambda x: (tf.cast(x, tf.float32) - a_mean)/a_std
                 # log_pi = lambda x: tf.math.log( 1/a_std*phi(inp(x))/(PHI(inp(0.99)) - PHI(inp(-0.99))) )
                 log_pi = lambda x: tf.math.log(1/(tf.abs(a_std)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - a_mean)/(2*tf.math.square(a_std)) 
+                pi = lambda x, m, s: 1/(tf.sqrt(2*np.pi*tf.square(s)))*tf.exp(-tf.square(x - m)/(2*tf.square(s)))
                 log_prob = log_pi(pre_norm_action)
-                actor_loss = -discount*log_prob * tf.stop_gradient(advantage)
+
+                if ppo:
+                    # if prev_state_action_prob:
+                    pass
+                    # prev_state_action_prob = (new_sta
+
+                else:
+                    actor_loss = -discount*log_prob * tf.stop_gradient(advantage)
                 #actor_loss = -log_pi(action) * target
                 critic_loss = tf.math.square(advantage)
                 joint_loss = tf.add(actor_loss, critic_loss)
@@ -392,6 +434,7 @@ class BallzAgent(models.Model):
             cnn_gradient = cnn_tape.gradient(joint_loss, self.cnn.trainable_weights)
             self.cnn_optimizer.apply_gradients(zip(cnn_gradient, self.cnn.trainable_weights))
             discount *= self.gamma
+            state = observation
 
             score = info['score']
 
