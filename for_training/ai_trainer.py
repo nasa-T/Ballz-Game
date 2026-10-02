@@ -181,7 +181,7 @@ class BallzAgent(models.Model):
             self.batch_size = 1
 
         self.cnn = models.Sequential([
-             layers.Input(self.grid_dims, name='Input', batch_size=self.batch_size),
+             layers.Input(self.grid_dims, name='Input', batch_size=None),
              layers.Conv2D(24, (4,3), padding='same', activation='relu', name='Conv2d_Layer_1'),
              layers.Conv2D(32, (4,3), padding='same', activation='relu', name='Conv2d_Layer_2'),
              layers.Flatten(),
@@ -191,14 +191,14 @@ class BallzAgent(models.Model):
         self.obs_flat_shape = self.cnn.output_shape[-1] + len(obs_space)-1
         
         self.actor = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=self.batch_size),
+                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
                 layers.Dense(24, activation='tanh'),
                 layers.Dense(24, activation='relu'),
                 layers.Dense(2, activation='tanh')
             ])
 
         self.critic = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=self.batch_size),
+                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
                 layers.Dense(24, activation='relu'),
                 layers.Dense(24, activation='relu'),
                 layers.Dense(1)
@@ -235,7 +235,7 @@ class BallzAgent(models.Model):
             state_tensor = tf.concat([flat_blocks, [scalar_tensor]], 1)
         return state_tensor
         
-    def train(self, n_episodes=1000, live_plot=False):
+    def train(self, n_episodes=1000, live_plot=False, ppo=False, mc=False):
         # rewards = []
         if live_plot and self.fig == None and self.ax == None:
             self.fig, self.ax = plt.subplots(4,1)
@@ -261,7 +261,11 @@ class BallzAgent(models.Model):
                     self.ax[0].set_facecolor("black")
                 state, info = self.env.reset()
 
-                episode_reward, new_state, score = self.run_episode(state, live_plot=live_plot)
+                if mc:
+                    episode_reward, new_state, score = self.run_episode_mc(state, live_plot=live_plot, ppo=ppo)
+                else:
+                    episode_reward, new_state, score = self.run_episode(state, live_plot=live_plot, ppo=ppo)
+
                 #self.cnn.save('models/feature_extractor.keras')
                 #self.critic.save('models/critic.keras')
                 #self.actor.save('models/actor.keras')
@@ -294,11 +298,6 @@ class BallzAgent(models.Model):
         self.env.close()
 
         return self.rewards
-
-    def animate(self, i):
-        self.ax.clear()
-        self.ax.plot(range(len(self.rewards)),self.rewards)
-        plt.show()
 
     def run_episode(self, state, live_plot=False, ppo=False):
         terminated = np.array([False]*self.batch_size)
@@ -405,25 +404,188 @@ class BallzAgent(models.Model):
                 PHI = lambda x: 1/2*(1 + tf.math.erf(x/np.sqrt(2)))
                 inp = lambda x: (tf.cast(x, tf.float32) - a_mean)/a_std
                 # log_pi = lambda x: tf.math.log( 1/a_std*phi(inp(x))/(PHI(inp(0.99)) - PHI(inp(-0.99))) )
-                log_pi = lambda x: tf.math.log(1/(tf.abs(a_std)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - a_mean)/(2*tf.math.square(a_std)) 
+                log_pi = lambda x, m, s: tf.math.log(1/(tf.abs(s)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - m)/(2*tf.math.square(s)) 
                 pi = lambda x, m, s: 1/(tf.sqrt(2*np.pi*tf.square(s)))*tf.exp(-tf.square(x - m)/(2*tf.square(s)))
-                log_prob = log_pi(pre_norm_action)
+                log_prob = log_pi(pre_norm_action, a_mean, a_std)
 
                 if ppo:
-                    # if prev_state_action_prob:
-                    pass
-                    # prev_state_action_prob = (new_sta
+                    if prev_state_action_prob:
+                        old_state, old_action, old_log_prob, old_adv = prev_state_action_prob
+                        # Mean and std based on previous state with updated actor
+                        ps_mean, ps_std = self.actor(old_state)[0] 
+                        ps_log_prob = log_pi(old_action, ps_mean, ps_std)
+                        r = tf.math.exp(ps_log_prob - old_log_prob)
+                        actor_loss = -tf.math.minimum(r*old_adv, tf.clip_by_value(r, 1-self.epsilon, 1+self.epsilon)*old_adv)
+                        critic_loss = tf.math.square(advantage)
+                        joint_loss = tf.add(actor_loss, critic_loss)
 
                 else:
                     actor_loss = -discount*log_prob * tf.stop_gradient(advantage)
-                #actor_loss = -log_pi(action) * target
-                critic_loss = tf.math.square(advantage)
-                joint_loss = tf.add(actor_loss, critic_loss)
-                self.a_losses.append(actor_loss)
-                self.c_losses.append(critic_loss)
+                    #actor_loss = -log_pi(action) * target
+                    critic_loss = tf.math.square(advantage)
+                    joint_loss = tf.add(actor_loss, critic_loss)
 
                 # print("T,V:", target,curr_val.numpy())
                 #print("A,R,L:", advantage.numpy(), reward, critic_loss.numpy())
+            if not ppo or prev_state_action_prob:
+                # update critic and actor
+                c_gradient = critic_tape.gradient(critic_loss, self.critic.trainable_weights)
+                self.c_optimizer.apply_gradients(zip(c_gradient, self.critic.trainable_weights))
+                a_gradient = actor_tape.gradient(actor_loss, self.actor.trainable_weights)
+                self.a_optimizer.apply_gradients(zip(a_gradient, self.actor.trainable_weights))
+                # use joint loss to update cnn featureinator
+                cnn_gradient = cnn_tape.gradient(joint_loss, self.cnn.trainable_weights)
+                self.cnn_optimizer.apply_gradients(zip(cnn_gradient, self.cnn.trainable_weights))
+                discount *= self.gamma
+                state = observation
+
+                self.a_losses.append(actor_loss)
+                self.c_losses.append(critic_loss)
+
+            prev_state_action_prob = (state_tensor, pre_norm_action, log_prob, advantage)
+            score = info['score']
+
+            # state_tensor = new_state_tensor
+            state = observation # update state
+            tot_reward += reward
+
+        return tot_reward, state_tensor, score 
+
+    def run_episode_mc(self, state, live_plot=False, ppo=False):
+        terminated = np.array([False]*self.batch_size)
+        tot_reward = 0
+        score = 0
+        discount = 1
+        self.recent_rewards = []
+        self.recent_mean_action = []
+        self.recent_std_action = []
+        log_probs = []
+        pred_vals = [] # values predicted by critic
+        states, actions = [], []
+        prev_state_action_prob = None
+        prev_mean = 1
+        prev_std = 1
+        while not terminated.all():
+            if live_plot:
+                self.ax[1].set_facecolor("black")
+                self.ax[1].axhline(ls='--')
+                self.ax[1].lines[0].set_xdata(range(len(self.recent_rewards)))
+                self.ax[1].lines[0].set_ydata(self.recent_rewards) 
+                self.ax[1].lines[0].set_color("green")
+                self.ax[1].spines['bottom'].set_color("green")
+                self.ax[1].spines['top'].set_color("green")
+                self.ax[1].spines['left'].set_color("green")
+                self.ax[1].spines['right'].set_color("green")
+                self.ax[1].tick_params(labelcolor="green", color="green")
+                self.ax[1].relim(); self.ax[1].autoscale_view(); 
+                self.ax[1].legend()
+                self.ax[2].set_facecolor("black")
+                self.ax[2].axhline(ls='--')
+                self.ax[2].lines[0].set_xdata(range(len(self.recent_mean_action)))
+                self.ax[2].lines[0].set_ydata(self.recent_mean_action) 
+                self.ax[2].lines[1].set_xdata(range(len(self.recent_std_action)))
+                self.ax[2].lines[1].set_ydata(self.recent_std_action) 
+                self.ax[2].lines[0].set_color("green")
+                self.ax[2].lines[1].set_color("red")
+                self.ax[2].spines['bottom'].set_color("green")
+                self.ax[2].spines['top'].set_color("green")
+                self.ax[2].spines['left'].set_color("green")
+                self.ax[2].spines['right'].set_color("green")
+                self.ax[2].tick_params(labelcolor="green", color="green")
+                self.ax[2].relim(); self.ax[2].autoscale_view(); 
+                self.ax[2].legend()
+                self.ax[3].set_facecolor("black")
+                self.ax[3].axhline(ls='--')
+                self.ax[3].lines[0].set_xdata(range(len(self.c_losses[-50:])))
+                self.ax[3].lines[0].set_ydata(self.c_losses[-50:]) 
+                self.ax[3].lines[1].set_xdata(range(len(self.a_losses[-50:])))
+                self.ax[3].lines[1].set_ydata(self.a_losses[-50:]) 
+                self.ax[3].lines[0].set_color("green")
+                self.ax[3].lines[1].set_color("red")
+                self.ax[3].spines['bottom'].set_color("green")
+                self.ax[3].spines['top'].set_color("green")
+                self.ax[3].spines['left'].set_color("green")
+                self.ax[3].spines['right'].set_color("green")
+                self.ax[3].tick_params(labelcolor="green", color="green")
+                self.ax[3].relim(); self.ax[3].autoscale_view(); 
+                self.ax[3].legend()
+                plt.pause(0.001)
+            # self.learning_rate = np.clip(self.learning_rate*1.05, a_min=0, a_max=1e-3)
+
+            state_tensor = self.forward(state)
+            # Actor mean and std prediction assuming gaussian distribution
+            a_mean, a_std = self.actor(state_tensor)[0]
+            # action = np.clip(np.random.normal(a_mean, np.abs(a_std))/2, a_min=-0.95, a_max=0.95) # sample from gaussian
+            # a_std = tf.math.maximum(1e-3, tf.abs(a_std))
+            a_std = tf.math.exp(a_std)
+            a_std = 0.2
+            pre_norm_action = tf.random.normal([self.batch_size],a_mean, a_std) # sample from gaussian
+            action = 0.95*tf.math.tanh(pre_norm_action)
+
+            states.append(state)
+            actions.append(pre_norm_action)
+            # if np.isnan(action):
+            #     raise Exception("Action is nan, something went awry.")
+            if isinstance(self.env, gym.vector.SyncVectorEnv):
+                observation, reward, terminated, _, info = self.env.step(action)
+            else:
+                observation, reward, terminated, _, info = self.env.step(action[0])
+            self.recent_rewards.append(reward)
+            self.recent_mean_action.append(a_mean)
+            self.recent_std_action.append(a_std)
+            new_state_tensor = self.forward(observation) # observation as a tensor
+
+            curr_val = self.critic(state_tensor)[0][0]
+            next_val = self.critic(new_state_tensor)[0][0]
+            pred_vals.append(curr_val)
+
+            log_pi = lambda x, m, s: tf.math.log(1/(tf.abs(s)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - m)/(2*tf.math.square(s)) 
+            pi = lambda x, m, s: 1/(tf.sqrt(2*np.pi*tf.square(s)))*tf.exp(-tf.square(x - m)/(2*tf.square(s)))
+            log_prob = log_pi(pre_norm_action, a_mean, a_std)
+            log_probs.append(log_prob)
+
+
+                # print("T,V:", target,curr_val.numpy())
+                #print("A,R,L:", advantage.numpy(), reward, critic_loss.numpy())
+
+            # prev_state_action_prob = (state_tensor, pre_norm_action, log_prob, advantage)
+            score = info['score']
+
+            # state_tensor = new_state_tensor
+            state = observation # update state
+            tot_reward += reward
+
+        if ppo:
+            if prev_state_action_prob:
+                old_state, old_action, old_log_prob, old_adv = prev_state_action_prob
+                # Mean and std based on previous state with updated actor
+                ps_mean, ps_std = self.actor(old_state)[0] 
+                ps_log_prob = log_pi(old_action, ps_mean, ps_std)
+                r = tf.math.exp(ps_log_prob - old_log_prob)
+                actor_loss = -tf.math.minimum(r*old_adv, tf.clip_by_value(r, 1-self.epsilon, 1+self.epsilon)*old_adv)
+                critic_loss = tf.math.square(advantage)
+                joint_loss = tf.add(actor_loss, critic_loss)
+
+        else:
+            returns = self.compute_returns()
+            with tf.GradientTape() as actor_tape, tf.GradientTape() as critic_tape, tf.GradientTape(persistent=True) as cnn_tape:
+                states_batch = {
+                    'blocks': tf.stack([s['blocks'][0] for s in states]),
+                    'nballs': tf.stack([s['nballs'][0] for s in states]),
+                    'position': tf.stack([s['position'][0] for s in states])
+                }
+                states_tensors = self.forward(states_batch)
+                means, stds = tf.transpose(self.actor(states_tensors))
+                log_pi = lambda x, m, s: tf.math.log(1/(tf.abs(s)*np.sqrt(2*np.pi))) - tf.square(tf.cast(x, tf.float32) - m)/(2*tf.math.square(s)) 
+                actions_tensor = tf.concat(actions, 0)
+                stds = tf.math.exp(stds)
+                log_pis = log_pi(actions_tensor, means, stds)
+                pred_vals = self.critic(states_tensors)
+                advantages = returns - pred_vals
+                actor_loss = -tf.reduce_mean(log_pis * tf.stop_gradient(advantages))
+                #actor_loss = -log_pi(action) * target
+                critic_loss = tf.reduce_mean(tf.math.square(advantages))
+                joint_loss = tf.add(actor_loss, critic_loss)
 
             # update critic and actor
             c_gradient = critic_tape.gradient(critic_loss, self.critic.trainable_weights)
@@ -435,10 +597,18 @@ class BallzAgent(models.Model):
             self.cnn_optimizer.apply_gradients(zip(cnn_gradient, self.cnn.trainable_weights))
             discount *= self.gamma
             state = observation
+            
+            self.a_losses.append(actor_loss)
+            self.c_losses.append(critic_loss)
 
-            score = info['score']
-
-            state_tensor = new_state_tensor
-            tot_reward += reward
-
+        states, actions, log_probs, pred_vals = [], [], [], []
         return tot_reward, state_tensor, score 
+
+    def compute_returns(self):
+        returns = np.zeros_like(self.recent_rewards, np.float32)
+        G = 0
+        for t in range(len(self.recent_rewards)-1, -1, -1):
+            G = self.recent_rewards[t] + G*self.gamma
+            returns[t] = G
+        return returns
+
