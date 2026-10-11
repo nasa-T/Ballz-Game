@@ -155,6 +155,7 @@ class Game: # holds everything
         clock = pygame.time.Clock()
         terminated = False
         running = True
+        truncated = False
 
         # if render:
         #     screen = pygame.display.set_mode((self.width, self.height))
@@ -180,6 +181,10 @@ class Game: # holds everything
                 frame_time = 0
 
             for ball in self.balls:
+                if np.isnan(ball.x+ball.y+ball.vx+ball.vy):
+                    running = False
+                    truncated = True
+                    break
                 ball.update()
 
             if render:
@@ -190,7 +195,7 @@ class Game: # holds everything
                 clock.tick(20000)
 
         #pygame.quit()
-        return terminated, tot_time
+        return terminated, tot_time, truncated
                     
     def render(self, screen):
         surface = pygame.Surface((self.width, self.height))

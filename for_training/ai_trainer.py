@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 class BallzAgent(models.Model):
-    def __init__(self, env, alpha=1e-4, gamma=0.9, epsilon=0.2, seed=None):
+    def __init__(self, env, alpha=1e-4, critic_lr_scale=5, gamma=0.9, epsilon=0.2, seed=None, saved_model={"CNN": None, "Actor": None, "Critic": None}):
         np.random.seed(seed)
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
@@ -31,36 +31,49 @@ class BallzAgent(models.Model):
             self.grid_dims = obs_space["blocks"].shape
             self.batch_size = 1
 
-        self.cnn = models.Sequential([
-             layers.Input(self.grid_dims, name='Input', batch_size=None),
-             layers.Conv2D(16, (5,5), padding='same', activation='relu', name='Conv2d_Layer_1'),
-             layers.Conv2D(16, (5,5), padding='same', activation='relu', name='Conv2d_Layer_2'),
-             layers.Flatten(dtype=tf.float32),
-             # layers.Dense(20, activation='relu')
-            ])
+        if not saved_model["CNN"]:
+            self.cnn = models.Sequential([
+                 layers.Input(self.grid_dims, name='Input', batch_size=None),
+                 layers.Conv2D(128, (5,5), padding='same', activation='relu', name='Conv2d_Layer_1'),
+                 layers.Conv2D(64, (5,5), padding='same', activation='relu', name='Conv2d_Layer_2'),
+                 layers.Flatten(dtype=tf.float32),
+                 # layers.Dense(20, activation='relu')
+                ])
+        else:
+            self.cnn = saved_model["CNN"]
 
         self.obs_flat_shape = self.cnn.output_shape[-1] + len(obs_space)-1
         
-        self.actor = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
-                layers.Dense(16, activation='sigmoid'),
-                # layers.Dense(12, activation='relu'),
-                layers.Dense(2, activation='tanh', dtype=tf.float32)
-            ])
+        if not saved_model["Actor"]:
+            self.actor = models.Sequential([
+                    layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
+                    layers.Dense(32, activation='relu'),
+                    layers.Dense(24, activation='relu'),
+                    layers.Dense(16, activation='relu'),
+                    layers.Dense(2, activation='tanh', dtype=tf.float32)
+                ])
+        else:
+            self.actor = saved_model["Actor"]
 
-        self.critic = models.Sequential([
-                layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
-                layers.Dense(16, activation='sigmoid'),
-                # layers.Dense(12, activation='relu'),
-                layers.Dense(1, dtype=tf.float32)
-            ])
+        if not saved_model["Critic"]:
+            self.critic = models.Sequential([
+                    layers.Input(shape=(self.obs_flat_shape,), name='Input', batch_size=None),
+                    layers.Dense(32, activation='relu'),
+                    layers.Dense(24, activation='relu'),
+                    layers.Dense(16, activation='relu'),
+                    layers.Dense(8, activation='relu'),
+                    layers.Dense(1, dtype=tf.float32)
+                ])
+        else:
+            self.critic = saved_model["Critic"]
 
         self.learning_rate = alpha
+        self.c_lr_scale = critic_lr_scale
         self.cnn_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         # self.cnn_optimizer = tf.keras.mixed_precision.LossScaleOptimizer(self.cnn_optimizer)
         self.a_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
         # self.a_optimizer = tf.keras.mixed_precision.LossScaleOptimizer(self.a_optimizer)
-        self.c_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate*3)
+        self.c_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate*self.c_lr_scale)
         # self.c_optimizer = tf.keras.mixed_precision.LossScaleOptimizer(self.c_optimizer)
 
         self.gamma = gamma
@@ -181,6 +194,13 @@ class BallzAgent(models.Model):
         prev_std = 1
 
         while not terminated.all():
+            # log_lr = -2*np.cos(self.update_step/1500*2*np.pi) - 4
+            # self.cnn_optimizer.learning_rate = 10**(log_lr)
+            # self.a_optimizer.learning_rate = 10**(log_lr)
+            # self.c_optimizer.learning_rate = 10**(log_lr)*self.c_lr_scale
+            # with self.logger.as_default():
+            #     tf.summary.scalar("learning rate", self.cnn_optimizer.learning_rate, step=self.update_step)
+
             if live_plot:
                 self.ax[1].set_facecolor("black")
                 self.ax[1].axhline(ls='--')
@@ -241,9 +261,9 @@ class BallzAgent(models.Model):
                 if np.isnan(action).any():
                     raise Exception("Action is nan, something went awry.")
                 if isinstance(self.env, (gym.vector.SyncVectorEnv, gym.vector.AsyncVectorEnv)):
-                    observation, reward, step_terminated, _, info = self.env.step(action)
+                    observation, reward, step_terminated, step_truncated, info = self.env.step(action)
                 else:
-                    observation, reward, step_terminated, _, info = self.env.step(action[0])
+                    observation, reward, step_terminated, step_truncated, info = self.env.step(action[0])
                 self.recent_rewards.append(tf.reduce_mean(reward))
                 self.recent_mean_action.append(tf.reduce_mean(a_mean))
                 self.recent_std_action.append(tf.reduce_mean(a_std))
@@ -262,7 +282,7 @@ class BallzAgent(models.Model):
                 else:
                     target = []
                     for i, t in enumerate(step_terminated):
-                        if t:
+                        if t or step_truncated[i]:
                             target.append(tf.Variable([reward[i]], shape=(1,), dtype=tf.float32))
                             with self.logger.as_default():
                                 tf.summary.scalar("score", info["score"][i], step=self.episode_num)

@@ -81,10 +81,6 @@ class BallzEnv(gym.Env):
         return observation, self._get_info()
         
     def step(self, action):
-        if self.terminated:
-            print("already termed")
-            return self._get_obs(), 0, self.terminated, False, self._get_info()
-
         render=False
         if self.render_mode == "human":
             render=True
@@ -95,12 +91,13 @@ class BallzEnv(gym.Env):
             self.window = pygame.display.set_mode((self.width, self.height))
         if render and self.clock == None and self.render_mode == "human":
             self.clock = pygame.time.Clock()
-        game_over, sub_steps = self.game.step(np.pi/2*action, render=render, screen=self.window)
+        game_over, sub_steps, truncated = self.game.step(np.pi/2*action, render=render, screen=self.window)
         observation = self._get_obs()
         self.terminated = game_over
+
         # change in tot health between steps decreasing penalty of increasing total blocks with 0.9 factor
         new_block_tot = np.sum(observation["blocks"][:,:,0])
-        block_change = self.block_total - new_block_tot*0.8
+        block_change = self.block_total - new_block_tot*0.75
         bonus = self.game.index if new_block_tot < 2 and not game_over else 0
         # - 0.1*sub_steps/observation['nballs']
         # reward = (1.1*self.game.index + block_change + bonus)/observation["nballs"] if not game_over else (self.game.index - 2*self.game.limit)/observation["nballs"]
@@ -111,13 +108,17 @@ class BallzEnv(gym.Env):
         else:
             impending_doom = 0
         # reward = 1.25 + block_change + bonus if not game_over else -1
-        reward = 1.25 + impending_doom if not game_over else -self.game.limit
+        if truncated:
+            reward = 0
+        else:
+            reward = 1.75 + impending_doom if not game_over else -self.game.limit
+            
         self.block_total = new_block_tot
 
         terminated = (self.game.index >= 1000) or game_over
         info = self._get_info()
 
-        return observation, reward, terminated, False, info
+        return observation, reward, terminated, truncated, info
 
     # def render(self):
     #     if self.window is None and self.render_mode == "human":
